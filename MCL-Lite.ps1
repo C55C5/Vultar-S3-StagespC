@@ -1,3 +1,6 @@
+# SOTFO Recording Policy
+# Read-only console check. Does not create output files or modify system settings.
+
 $ErrorActionPreference = "SilentlyContinue"
 
 function Section {
