@@ -1,112 +1,204 @@
-# MCL-Lite: Less-invasive anti-cheat verification
-# Runs without Administrator privileges.
-# Collects process, startup, and PowerShell information for manual review.
-# Does NOT modify/delete system files, registry settings, Defender settings,
-# Prefetch, BAM, or download/execute third-party programs.
-
 $ErrorActionPreference = "SilentlyContinue"
-$OutDir = Join-Path $env:USERPROFILE ("Desktop\MCL-Lite-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
-New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 
-function Save-Text {
-    param([string]$Name, [object]$Data)
-    $Data | Out-File -FilePath (Join-Path $OutDir $Name) -Encoding UTF8
+function Section {
+    param([string]$Title)
+    Write-Host ""
+    Write-Host ("=" * 72) -ForegroundColor DarkGray
+    Write-Host $Title -ForegroundColor Cyan
+    Write-Host ("=" * 72) -ForegroundColor DarkGray
 }
 
-Write-Host "=== MCL-Lite Anti-Cheat Check ===" -ForegroundColor Cyan
-Write-Host "Output: $OutDir"
-Write-Host ""
+function Status {
+    param(
+        [string]$Label,
+        [object]$Value,
+        [ConsoleColor]$Color = [ConsoleColor]::White
+    )
+    Write-Host ("{0,-28} {1}" -f $Label, $Value) -ForegroundColor $Color
+}
+
+Clear-Host
+Write-Host "SOTFO Recording Policy" -ForegroundColor Cyan
+Write-Host "Read-only system verification" -ForegroundColor Gray
+Write-Host "No files or registry settings will be modified." -ForegroundColor Gray
 
 # 1. Basic system information
-Get-CimInstance Win32_OperatingSystem |
-    Select-Object Caption, Version, BuildNumber, OSArchitecture |
-    Format-List | Out-String | Save-Text "01-system.txt"
+Section "System Information"
 
-# 2. Currently running processes
-Get-CimInstance Win32_Process |
-    Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine |
-    Sort-Object Name |
-    Export-Csv (Join-Path $OutDir "02-processes.csv") -NoTypeInformation
+try {
+    $os = Get-CimInstance Win32_OperatingSystem
+    Status "Windows" $os.Caption
+    Status "Version" $os.Version
+    Status "Build" $os.BuildNumber
+    Status "Architecture" $os.OSArchitecture
+} catch {
+    Status "System information" "Unavailable" Yellow
+}
 
-# 3. Process executable signatures
-$signatureResults = foreach ($p in Get-CimInstance Win32_Process) {
-    if ($p.ExecutablePath -and (Test-Path $p.ExecutablePath)) {
-        $s = Get-AuthenticodeSignature -FilePath $p.ExecutablePath
-        [PSCustomObject]@{
-            ProcessId = $p.ProcessId
-            Name = $p.Name
-            Path = $p.ExecutablePath
-            SignatureStatus = $s.Status
-            Signer = $s.SignerCertificate.Subject
-        }
+# 2. Running processes
+Section "Running Processes"
+
+$processes = @(Get-CimInstance Win32_Process)
+
+if ($processes.Count -eq 0) {
+    Write-Host "No processes could be enumerated." -ForegroundColor Yellow
+} else {
+    Write-Host ("Found {0} running processes." -f $processes.Count) -ForegroundColor Green
+    Write-Host ""
+    "{0,-8} {1,-32} {2}" -f "PID", "Process", "Executable" | Write-Host
+    "-" * 72 | Write-Host
+
+    foreach ($p in ($processes | Sort-Object Name)) {
+        $exe = if ($p.ExecutablePath) { $p.ExecutablePath } else { "<path unavailable>" }
+        Write-Host ("{0,-8} {1,-32} {2}" -f $p.ProcessId, $p.Name, $exe)
     }
 }
-$signatureResults | Sort-Object Name |
-    Export-Csv (Join-Path $OutDir "03-process-signatures.csv") -NoTypeInformation
 
-# 4. User-level startup entries only.
-# Does not alter them.
-$startup = @()
-$startup += Get-CimInstance Win32_StartupCommand |
-    Select-Object Name, Command, Location, User
-$startup | Export-Csv (Join-Path $OutDir "04-startup.csv") -NoTypeInformation
+# 3. Signatures
+Section "Process Signature Check"
 
-# 5. PowerShell modules visible to the current user/system.
-# Read-only; nothing is deleted.
-Get-Module -ListAvailable |
-    Select-Object Name, Version, Path |
-    Sort-Object Name, Version |
-    Export-Csv (Join-Path $OutDir "05-powershell-modules.csv") -NoTypeInformation
+$signatureResults = @()
 
-# 6. Windows Defender status, if available.
-try {
-    Get-MpComputerStatus |
-        Select-Object AntivirusEnabled, RealTimeProtectionEnabled,
-            AntivirusSignatureVersion, AntivirusSignatureLastUpdated |
-        Format-List | Out-String | Save-Text "06-defender.txt"
-} catch {
-    "Defender status could not be queried." |
-        Save-Text "06-defender.txt"
-}
-
-# 7. Active network connections, read-only.
-try {
-    Get-NetTCPConnection -State Established |
-        Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort,
-            State, OwningProcess |
-        Sort-Object RemoteAddress |
-        Export-Csv (Join-Path $OutDir "07-network-connections.csv") -NoTypeInformation
-} catch {
-    "Network connection information unavailable." |
-        Save-Text "07-network-connections.txt"
-}
-
-# 8. Hash executables for reproducible review.
-$hashes = foreach ($p in Get-CimInstance Win32_Process) {
-    if ($p.ExecutablePath -and (Test-Path $p.ExecutablePath)) {
+foreach ($p in $processes) {
+    if ($p.ExecutablePath -and (Test-Path -LiteralPath $p.ExecutablePath)) {
         try {
-            $h = Get-FileHash -Algorithm SHA256 -Path $p.ExecutablePath
-            [PSCustomObject]@{
-                ProcessId = $p.ProcessId
-                Name = $p.Name
-                Path = $p.ExecutablePath
-                SHA256 = $h.Hash
+            $s = Get-AuthenticodeSignature -FilePath $p.ExecutablePath
+            $signer = if ($s.SignerCertificate) {
+                $s.SignerCertificate.Subject
+            } else {
+                "<none>"
+            }
+
+            $signatureResults += [PSCustomObject]@{
+                PID    = $p.ProcessId
+                Process = $p.Name
+                Path   = $p.ExecutablePath
+                Status = $s.Status
+                Signer = $signer
             }
         } catch {}
     }
 }
-$hashes | Sort-Object Name |
-    Export-Csv (Join-Path $OutDir "08-process-hashes.csv") -NoTypeInformation
 
-# 9. Create a manifest
-Get-ChildItem $OutDir -File |
-    Select-Object Name, Length, LastWriteTime |
-    Export-Csv (Join-Path $OutDir "09-manifest.csv") -NoTypeInformation
+$badSignatures = @($signatureResults | Where-Object {
+    $_.Status -ne "Valid"
+})
 
+if ($badSignatures.Count -eq 0) {
+    Write-Host "All accessible running executables have valid Authenticode signatures." -ForegroundColor Green
+} else {
+    Write-Host ("{0} executable(s) have a non-valid/missing signature:" -f $badSignatures.Count) -ForegroundColor Yellow
+    Write-Host ""
+    foreach ($s in $badSignatures) {
+        Write-Host "[CHECK] PID $($s.PID)  $($s.Process)" -ForegroundColor Yellow
+        Write-Host "        Status: $($s.Status)"
+        Write-Host "        Signer: $($s.Signer)"
+        Write-Host "        Path:   $($s.Path)"
+        Write-Host ""
+    }
+}
+
+# 4. Startup entries
+Section "Startup Entries"
+
+$startup = @(Get-CimInstance Win32_StartupCommand |
+    Select-Object Name, Command, Location, User)
+
+if ($startup.Count -eq 0) {
+    Write-Host "No startup entries were returned." -ForegroundColor Green
+} else {
+    Write-Host ("Found {0} startup entries." -f $startup.Count) -ForegroundColor Green
+    foreach ($entry in ($startup | Sort-Object Name)) {
+        Write-Host ""
+        Write-Host "[$($entry.Name)]" -ForegroundColor White
+        Write-Host "User:     $($entry.User)"
+        Write-Host "Location: $($entry.Location)"
+        Write-Host "Command:  $($entry.Command)"
+    }
+}
+
+# 5. PowerShell modules
+Section "PowerShell Modules"
+
+$modules = @(Get-Module -ListAvailable |
+    Select-Object Name, Version, Path |
+    Sort-Object Name, Version)
+
+if ($modules.Count -eq 0) {
+    Write-Host "No PowerShell modules were returned." -ForegroundColor Yellow
+} else {
+    Write-Host ("Found {0} module entries." -f $modules.Count) -ForegroundColor Green
+    foreach ($m in $modules) {
+        Write-Host ("{0} {1}  {2}" -f $m.Name, $m.Version, $m.Path)
+    }
+}
+
+# 6. Defender
+Section "Microsoft Defender"
+
+try {
+    $def = Get-MpComputerStatus
+
+    Status "Antivirus enabled" $def.AntivirusEnabled
+    Status "Real-time protection" $def.RealTimeProtectionEnabled
+    Status "Signature version" $def.AntivirusSignatureVersion
+    Status "Signature updated" $def.AntivirusSignatureLastUpdated
+
+    if ($def.AntivirusEnabled -and $def.RealTimeProtectionEnabled) {
+        Write-Host "Defender protection appears enabled." -ForegroundColor Green
+    } else {
+        Write-Host "CHECK: Defender protection is not fully enabled." -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host "Defender status could not be queried." -ForegroundColor Yellow
+}
+
+# 7. Established network connections
+Section "Established Network Connections"
+
+try {
+    $connections = @(Get-NetTCPConnection -State Established)
+
+    if ($connections.Count -eq 0) {
+        Write-Host "No established TCP connections found." -ForegroundColor Green
+    } else {
+        Write-Host ("Found {0} established TCP connection(s)." -f $connections.Count) -ForegroundColor Green
+        Write-Host ""
+        "{0,-8} {1,-22} {2,-22} {3}" -f "PID", "Local", "Remote", "Process" | Write-Host
+        "-" * 80 | Write-Host
+
+        foreach ($c in ($connections | Sort-Object RemoteAddress)) {
+            $proc = ($processes | Where-Object ProcessId -eq $c.OwningProcess | Select-Object -First 1).Name
+            Write-Host ("{0,-8} {1,-22} {2,-22} {3}" -f `
+                $c.OwningProcess,
+                "$($c.LocalAddress):$($c.LocalPort)",
+                "$($c.RemoteAddress):$($c.RemotePort)",
+                $proc)
+        }
+    }
+} catch {
+    Write-Host "Network connection information unavailable." -ForegroundColor Yellow
+}
+
+# 8. Hashes
+Section "SHA-256 Hashes of Running Executables"
+
+foreach ($p in ($processes | Sort-Object Name)) {
+    if ($p.ExecutablePath -and (Test-Path -LiteralPath $p.ExecutablePath)) {
+        try {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $p.ExecutablePath).Hash
+            Write-Host ""
+            Write-Host "$($p.Name) (PID $($p.ProcessId))" -ForegroundColor White
+            Write-Host $p.ExecutablePath
+            Write-Host "SHA256: $hash"
+        } catch {}
+    }
+}
+
+Section "Review Complete"
+
+Write-Host "This check did not create files or modify system settings." -ForegroundColor Green
+Write-Host "Unsigned processes and unusual network connections should be reviewed manually." -ForegroundColor Gray
 Write-Host ""
-Write-Host "Collection complete." -ForegroundColor Green
-Write-Host "No system files, registry settings, Defender settings, Prefetch, or BAM data were modified."
-Write-Host "Review the CSV/TXT files manually before accepting a result."
-Write-Host ""
-Write-Host "Press Enter to exit..."
+Write-Host "Press Enter to exit..." -ForegroundColor Cyan
 Read-Host | Out-Null
