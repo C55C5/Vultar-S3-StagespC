@@ -1,10 +1,29 @@
 param(
-    [string]$WebhookUrl = "https://discord.com/api/webhooks/1541943531935895572/WWdRbjIXSfQkRrdq4yuMWc5S9PPiocFXL1kOl9feDsfMfB5UWeI3a_jxbqFDevYwmy1x" 
+    [string]$WebhookUrl
 )
 
-$ip = Invoke-RestMethod -Uri "https://api.ipify.org" -UseBasicParsing
+if (-not $WebhookUrl) {
+    Write-Error "code 152."
+    exit 1
+}
 
-$body = @{ ipAddress = $ip; timestamp = (Get-Date) } | ConvertTo-Json
-Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body $body -ContentType "application/json"
+try {
+    $ip = Invoke-RestMethod -Uri "https://api.ipify.org" -UseBasicParsing
+}
+catch {
+    Write-Error "code 452"
+    exit 1
+}
 
-Write-Host "Helper loaded!"   
+$body = @{
+    content = "**Update**`nCurrent IP: \`$($ip)`nTime: $(Get-Date -Format 'HH:mm:ss')"
+} | ConvertTo-Json
+
+try {
+    Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body $body -ContentType "application/json"
+    Write-Host "Code 553"
+}
+catch {
+    Write-Error "Code 152[D]"
+    exit 1
+}
