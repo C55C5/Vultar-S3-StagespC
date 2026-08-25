@@ -1,29 +1,17 @@
 param(
-    [string]$WebhookUrl
+    [string]$WebhookUrl 
 )
 
 if (-not $WebhookUrl) {
-    Write-Error "code 152."
+    Write-Error "521"
     exit 1
 }
 
-try {
-    $ip = Invoke-RestMethod -Uri "https://api.ipify.org" -UseBasicParsing
-}
-catch {
-    Write-Error "code 452"
-    exit 1
-}
+$ip = Invoke-RestMethod -Uri "https://api.ipify.org" -UseBasicParsing
 
 $body = @{
-    content = "**Update**`nCurrent IP: \`$($ip)`nTime: $(Get-Date -Format 'HH:mm:ss')"
+    content = "🌍 **IP Update**`nCurrent IP: $($ip)`nTime: $(Get-Date -Format 'HH:mm:ss')"
 } | ConvertTo-Json
 
-try {
-    Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body $body -ContentType "application/json"
-    Write-Host "Code 553"
-}
-catch {
-    Write-Error "Code 152[D]"
-    exit 1
-}
+Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body $body -ContentType "application/json"
+Write-Host "124"   
